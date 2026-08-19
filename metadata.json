@@ -1,0 +1,6 @@
+{
+  "name": "Daily Care 🐼",
+  "description": "A mobile-first best-friend PWA with a cute panda theme for 8-hour sleep tracking, period timing & cycle care, gentle meal reminders, and 2-hourly hydration check-ins.",
+  "requestFramePermissions": ["notifications"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
