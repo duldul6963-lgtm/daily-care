@@ -1,0 +1,51 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Registered user profile with role and friend pairing info",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Auth UID" },
+        "email": { "type": "string", "description": "User email address" },
+        "displayName": { "type": "string", "maxLength": 100, "description": "Display name" },
+        "photoURL": { "type": "string", "description": "Avatar photo URL" },
+        "role": { "type": "string", "enum": ["admin", "friend"], "description": "User role" },
+        "createdAt": { "type": "string", "description": "Timestamp created" },
+        "lastActive": { "type": "string", "description": "Last active timestamp" }
+      },
+      "required": ["id", "email", "displayName", "role"]
+    },
+    "CareNotification": {
+      "title": "CareNotification",
+      "description": "Real-time care notification sent between admin and friend",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Notification ID" },
+        "recipientId": { "type": "string", "description": "UID of the recipient user" },
+        "recipientEmail": { "type": "string", "description": "Email of the recipient" },
+        "recipientName": { "type": "string", "maxLength": 100, "description": "Name of recipient" },
+        "senderId": { "type": "string", "description": "UID of the sender (admin or friend)" },
+        "senderName": { "type": "string", "maxLength": 100, "description": "Name of the sender" },
+        "senderRole": { "type": "string", "enum": ["admin", "friend"], "description": "Sender role" },
+        "type": { "type": "string", "enum": ["meal", "water", "sleep", "period", "nudge", "custom"], "description": "Notification type" },
+        "title": { "type": "string", "maxLength": 100, "description": "Notification title" },
+        "message": { "type": "string", "maxLength": 500, "description": "Notification text message" },
+        "emoji": { "type": "string", "maxLength": 10, "description": "Notification emoji symbol" },
+        "read": { "type": "boolean", "description": "Whether the recipient has read/viewed the notification" },
+        "actionTaken": { "type": "string", "maxLength": 100, "description": "Response action (e.g., 'ate', 'drank_water')" },
+        "createdAt": { "type": "string", "description": "Timestamp created" }
+      },
+      "required": ["recipientId", "senderId", "senderName", "title", "message", "read"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User account documents containing user role and identity"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "CareNotification",
+      "description": "Real-time notifications sent between admin and friends with read status"
+    }
+  }
+}

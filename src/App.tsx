@@ -1,5 +1,14 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { CareState, UserRole, MealId, MealStatusType, WaterSlotStatusType, CareSettings, MealRecord } from './types';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  CareState,
+  UserRole,
+  MealId,
+  MealStatusType,
+  WaterSlotStatusType,
+  CareSettings,
+  MealRecord,
+  CareNotificationItem,
+} from './types';
 import {
   fetchServerState,
   loadLocalState,
@@ -18,6 +27,11 @@ import {
   playMealChime,
   playGentleReminderChime,
 } from './utils/sound';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import {
+  subscribeToRecipientNotifications,
+  respondToNotification,
+} from './services/notificationService';
 import { Navbar } from './components/Navbar';
 import { AdminDashboard } from './components/AdminDashboard';
 import { FriendDashboard } from './components/FriendDashboard';
@@ -28,18 +42,34 @@ import { PeriodCycleCare } from './components/PeriodCycleCare';
 import { FriendNotesWall } from './components/FriendNotesWall';
 import { LiveNotificationToast, ActiveReminder } from './components/LiveNotificationToast';
 import { NotificationSettingsModal } from './components/NotificationSettingsModal';
+import { NotificationCenterModal } from './components/NotificationCenterModal';
 import { PwaInstallModal } from './components/PwaInstallModal';
 import { Smartphone, Bell, Moon, Heart } from 'lucide-react';
 
-export default function App() {
+function CareAppContent() {
+  const { user, userProfile, signInWithGoogle, logout, updateRole } = useAuth();
   const [state, setState] = useState<CareState>(loadLocalState);
   const [role, setRole] = useState<UserRole>('friend');
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const [isOnline, setIsOnline] = useState(
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
   const [showOfflineSyncBanner, setShowOfflineSyncBanner] = useState(false);
   const [isPwaModalOpen, setIsPwaModalOpen] = useState(false);
   const [isNotificationModalOpen, setIsNotificationModalOpen] = useState(false);
+  const [isNotificationCenterOpen, setIsNotificationCenterOpen] = useState(false);
   const [activeReminder, setActiveReminder] = useState<ActiveReminder | null>(null);
+
+  // Real-time Firestore Notifications for logged-in user
+  const [notifications, setNotifications] = useState<CareNotificationItem[]>([]);
+  const previousNotifCountRef = useRef<number>(0);
+
+  // Sync role with user profile if available
+  useEffect(() => {
+    if (userProfile?.role) {
+      setRole(userProfile.role);
+    }
+  }, [userProfile?.role]);
 
   // Online / Offline listeners
   useEffect(() => {
@@ -61,7 +91,11 @@ export default function App() {
 
   // Register PWA Service Worker
   useEffect(() => {
-    if (typeof window !== 'undefined' && 'serviceWorker' in navigator && process.env.NODE_ENV === 'production') {
+    if (
+      typeof window !== 'undefined' &&
+      'serviceWorker' in navigator &&
+      process.env.NODE_ENV === 'production'
+    ) {
       navigator.serviceWorker.register('/sw.js').catch((err) => {
         console.warn('SW registration skipped:', err);
       });
@@ -90,12 +124,16 @@ export default function App() {
     }
   }, [state.settings?.soundEnabled]);
 
-  const triggerNotification = useCallback(
+  const triggerToastReminder = useCallback(
     (reminder: ActiveReminder) => {
       setActiveReminder(reminder);
       playGentleReminderChime(soundEnabled);
 
-      if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+      if (
+        typeof window !== 'undefined' &&
+        'Notification' in window &&
+        Notification.permission === 'granted'
+      ) {
         try {
           new Notification(`Daily Care 🐼: ${reminder.title}`, {
             body: reminder.message,
@@ -109,18 +147,48 @@ export default function App() {
     [soundEnabled]
   );
 
+  // Subscribe to Real-Time Firestore Notifications for Recipient
+  useEffect(() => {
+    if (!user) {
+      setNotifications([]);
+      return;
+    }
+
+    const unsub = subscribeToRecipientNotifications(user.uid, (list) => {
+      setNotifications(list);
+
+      // Check if there is a new unread notification received
+      const unreadList = list.filter((n) => !n.read);
+      if (unreadList.length > 0 && list.length > previousNotifCountRef.current) {
+        const latest = unreadList[0];
+        triggerToastReminder({
+          id: latest.id,
+          type: latest.type as any,
+          title: latest.title,
+          message: latest.message,
+          emoji: latest.emoji,
+        });
+      }
+      previousNotifCountRef.current = list.length;
+    });
+
+    return () => unsub();
+  }, [user, triggerToastReminder]);
+
   // Periodic Reminder Checker (checks schedule against current time)
   useEffect(() => {
     const checkSchedule = () => {
       const now = new Date();
       const currentHours = now.getHours();
       const currentMinutes = now.getMinutes();
-      const timeString = `${String(currentHours).padStart(2, '0')}:${String(currentMinutes).padStart(2, '0')}`;
+      const timeString = `${String(currentHours).padStart(2, '0')}:${String(
+        currentMinutes
+      ).padStart(2, '0')}`;
 
       // Check meals waiting for response
       state.meals.forEach((meal) => {
         if (meal.status === 'waiting' && meal.time === timeString) {
-          triggerNotification({
+          triggerToastReminder({
             id: `meal-${meal.id}-${Date.now()}`,
             type: 'meal',
             title: `${meal.name} Reminder`,
@@ -132,10 +200,17 @@ export default function App() {
       });
 
       // Check 2-hour water intervals (7 AM to 10 PM)
-      if (currentMinutes === 0 && currentHours >= 7 && currentHours <= 22 && currentHours % 2 === 1) {
-        const slot = state.waterSlots.find((s) => s.time.startsWith(String(currentHours).padStart(2, '0')));
+      if (
+        currentMinutes === 0 &&
+        currentHours >= 7 &&
+        currentHours <= 22 &&
+        currentHours % 2 === 1
+      ) {
+        const slot = state.waterSlots.find((s) =>
+          s.time.startsWith(String(currentHours).padStart(2, '0'))
+        );
         if (slot && slot.status === 'waiting') {
-          triggerNotification({
+          triggerToastReminder({
             id: `water-${slot.id}-${Date.now()}`,
             type: 'water',
             title: 'Water Reminder',
@@ -148,7 +223,7 @@ export default function App() {
 
       // Check Bedtime reminder (e.g. 23:00)
       if (state.sleep?.bedtime === timeString) {
-        triggerNotification({
+        triggerToastReminder({
           id: `sleep-${Date.now()}`,
           type: 'sleep',
           title: '8 Hours Sleep Routine',
@@ -160,10 +235,14 @@ export default function App() {
 
     const timer = setInterval(checkSchedule, 30000);
     return () => clearInterval(timer);
-  }, [state.meals, state.waterSlots, state.sleep, triggerNotification]);
+  }, [state.meals, state.waterSlots, state.sleep, triggerToastReminder]);
 
   // Meal response handlers
-  const handleUpdateMeal = async (mealId: MealId, status: MealStatusType, notes?: string) => {
+  const handleUpdateMeal = async (
+    mealId: MealId,
+    status: MealStatusType,
+    notes?: string
+  ) => {
     const { state: updated, isOffline } = await updateMealApi(mealId, status, notes);
     setState(updated);
     if (isOffline) {
@@ -171,12 +250,18 @@ export default function App() {
       setTimeout(() => setShowOfflineSyncBanner(false), 4000);
     }
     if (activeReminder?.mealId === mealId) {
+      if (user && activeReminder.id && !activeReminder.id.startsWith('test-') && !activeReminder.id.startsWith('meal-')) {
+        await respondToNotification(activeReminder.id, status === 'ate' ? 'Yes, I ate 🍳' : "Haven't eaten yet");
+      }
       setActiveReminder(null);
     }
   };
 
   // Water response handlers
-  const handleUpdateWaterSlot = async (slotId: string, status: WaterSlotStatusType) => {
+  const handleUpdateWaterSlot = async (
+    slotId: string,
+    status: WaterSlotStatusType
+  ) => {
     const { state: updated, isOffline } = await updateWaterApi(slotId, status);
     setState(updated);
     if (isOffline) {
@@ -184,6 +269,9 @@ export default function App() {
       setTimeout(() => setShowOfflineSyncBanner(false), 4000);
     }
     if (activeReminder?.slotId === slotId) {
+      if (user && activeReminder.id && !activeReminder.id.startsWith('test-') && !activeReminder.id.startsWith('water-')) {
+        await respondToNotification(activeReminder.id, 'Drank water 💧');
+      }
       setActiveReminder(null);
     }
   };
@@ -218,14 +306,15 @@ export default function App() {
 
   // Best-friend Check-in Notes
   const handleSendMessage = async (text: string, emoji = '🐼') => {
-    const senderName = role === 'admin' ? state.adminName : state.friendName;
+    const senderName =
+      userProfile?.displayName || (role === 'admin' ? state.adminName : state.friendName);
     const updated = await sendNoteApi(role, senderName, text, emoji);
     setState(updated);
   };
 
   const handleSendNudge = (text: string, emoji: string) => {
     handleSendMessage(text, emoji);
-    triggerNotification({
+    triggerToastReminder({
       id: `nudge-${Date.now()}`,
       type: 'nudge',
       title: 'Best Friend Check-In',
@@ -256,6 +345,8 @@ export default function App() {
     handleUpdateSettings({ soundEnabled: next });
   };
 
+  const unreadCount = notifications.filter((n) => !n.read).length;
+
   return (
     <div className="min-h-screen bg-[#FAF7F2] flex flex-col text-slate-800">
       {/* Navigation Header */}
@@ -264,14 +355,21 @@ export default function App() {
         onRoleChange={(newRole) => {
           playDropletSound(soundEnabled);
           setRole(newRole);
+          if (user) updateRole(newRole);
         }}
         soundEnabled={soundEnabled}
         onToggleSound={handleToggleSound}
         onOpenPwaModal={() => setIsPwaModalOpen(true)}
         onOpenNotificationModal={() => setIsNotificationModalOpen(true)}
-        adminName={state.adminName}
-        friendName={state.friendName}
+        onOpenNotificationCenter={() => setIsNotificationCenterOpen(true)}
+        unreadNotificationCount={unreadCount}
+        adminName={userProfile?.role === 'admin' ? userProfile.displayName : state.adminName}
+        friendName={userProfile?.role === 'friend' ? userProfile.displayName : state.friendName}
         isOnline={isOnline}
+        user={user}
+        userProfile={userProfile}
+        onSignIn={signInWithGoogle}
+        onSignOut={logout}
       />
 
       {/* Main Container */}
@@ -294,27 +392,46 @@ export default function App() {
           </div>
         )}
 
-        {/* Role Switcher Pill Bar */}
-        <div className="flex items-center justify-between gap-2 px-4 py-2 rounded-2xl bg-stone-100/90 border border-stone-200 text-xs">
+        {/* Role Switcher Pill Bar & Auth Status */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-4 py-2.5 rounded-2xl bg-stone-100/90 border border-stone-200 text-xs">
           <div className="flex items-center gap-2">
             <span>{role === 'admin' ? '🛡️' : '🐼'}</span>
             <span className="font-medium text-slate-600">
               Active Mode:{' '}
               <strong className="text-slate-800">
-                {role === 'admin' ? `Admin (${state.adminName})` : `Friend (${state.friendName})`}
+                {role === 'admin'
+                  ? `Admin (${userProfile?.displayName || state.adminName})`
+                  : `Friend (${userProfile?.displayName || state.friendName})`}
               </strong>
             </span>
+            {user && (
+              <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-[10px]">
+                Cloud Connected ☁️
+              </span>
+            )}
           </div>
 
-          <button
-            onClick={() => {
-              playDropletSound(soundEnabled);
-              setRole(role === 'admin' ? 'friend' : 'admin');
-            }}
-            className="font-bold text-emerald-700 hover:text-emerald-800 underline flex items-center gap-1"
-          >
-            <span>Switch to {role === 'admin' ? 'Friend 🐼' : 'Admin 🛡️'}</span>
-          </button>
+          <div className="flex items-center gap-3">
+            {!user && (
+              <button
+                onClick={signInWithGoogle}
+                className="text-xs font-bold text-emerald-700 hover:underline"
+              >
+                Sign in for Real-Time Sync
+              </button>
+            )}
+            <button
+              onClick={() => {
+                playDropletSound(soundEnabled);
+                const nextRole = role === 'admin' ? 'friend' : 'admin';
+                setRole(nextRole);
+                if (user) updateRole(nextRole);
+              }}
+              className="font-bold text-emerald-700 hover:text-emerald-800 underline flex items-center gap-1"
+            >
+              <span>Switch to {role === 'admin' ? 'Friend 🐼' : 'Admin 🛡️'}</span>
+            </button>
+          </div>
         </div>
 
         {/* Main Dashboard depending on role */}
@@ -378,8 +495,8 @@ export default function App() {
         <FriendNotesWall
           messages={state.messages}
           role={role}
-          adminName={state.adminName}
-          friendName={state.friendName}
+          adminName={userProfile?.role === 'admin' ? userProfile.displayName : state.adminName}
+          friendName={userProfile?.role === 'friend' ? userProfile.displayName : state.friendName}
           soundEnabled={soundEnabled}
           onSendMessage={handleSendMessage}
         />
@@ -400,18 +517,30 @@ export default function App() {
             </button>
             <span>•</span>
             <button
-              onClick={() => setIsNotificationModalOpen(true)}
+              onClick={() => setIsNotificationCenterOpen(true)}
               className="text-emerald-700 font-semibold hover:underline flex items-center gap-1"
             >
               <Bell size={13} />
-              <span>Notification Test</span>
+              <span>Notifications ({unreadCount})</span>
             </button>
           </div>
           <p className="text-[11px] text-slate-400">
-            A gentle best-friend care app for 8h sleep, period timing, meals & water reminders.
+            A gentle best-friend care app with real-time Firebase notifications, 8h sleep & cycle care.
           </p>
         </div>
       </footer>
+
+      {/* Real-time Notification Center Modal */}
+      <NotificationCenterModal
+        isOpen={isNotificationCenterOpen}
+        onClose={() => setIsNotificationCenterOpen(false)}
+        notifications={notifications}
+        currentUserId={user?.uid}
+        soundEnabled={soundEnabled}
+        onActionMeal={(mealId, status) => handleUpdateMeal(mealId, status)}
+        onActionWater={(amt) => handleAddManualWater(amt)}
+        onActionSleep={() => handleUpdateSleep({ hoursSlept: 8, quality: 'great' })}
+      />
 
       {/* Live Interactive Notification Toast */}
       <LiveNotificationToast
@@ -449,7 +578,7 @@ export default function App() {
         soundEnabled={soundEnabled}
         onToggleSound={handleToggleSound}
         onTriggerTestMealReminder={() => {
-          triggerNotification({
+          triggerToastReminder({
             id: `test-breakfast-${Date.now()}`,
             type: 'meal',
             title: 'Breakfast Reminder',
@@ -459,7 +588,7 @@ export default function App() {
           });
         }}
         onTriggerTestWaterReminder={() => {
-          triggerNotification({
+          triggerToastReminder({
             id: `test-water-${Date.now()}`,
             type: 'water',
             title: 'Water Reminder',
@@ -469,7 +598,7 @@ export default function App() {
           });
         }}
         onTriggerTestSleepReminder={() => {
-          triggerNotification({
+          triggerToastReminder({
             id: `test-sleep-${Date.now()}`,
             type: 'sleep',
             title: '8 Hours Sleep Routine',
@@ -478,7 +607,7 @@ export default function App() {
           });
         }}
         onTriggerTestPeriodReminder={() => {
-          triggerNotification({
+          triggerToastReminder({
             id: `test-period-${Date.now()}`,
             type: 'period',
             title: 'Period & Cycle Care',
@@ -487,7 +616,7 @@ export default function App() {
           });
         }}
         onTriggerTestNudge={() => {
-          triggerNotification({
+          triggerToastReminder({
             id: `test-nudge-${Date.now()}`,
             type: 'nudge',
             title: 'Best Friend Check-In',
@@ -497,5 +626,13 @@ export default function App() {
         }}
       />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <CareAppContent />
+    </AuthProvider>
   );
 }

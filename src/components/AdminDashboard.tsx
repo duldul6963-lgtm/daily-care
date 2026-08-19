@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { CareState, CareSettings, MealRecord } from '../types';
+import React, { useState, useEffect } from 'react';
+import { CareState, CareSettings, MealRecord, UserProfile, CareNotificationItem } from '../types';
 import {
   Clock,
   Send,
@@ -14,8 +14,18 @@ import {
   ChevronRight,
   Moon,
   Heart,
+  User,
+  Users,
+  CheckCheck,
 } from 'lucide-react';
 import { HistoryView } from './HistoryView';
+import {
+  subscribeToRegisteredUsers,
+  sendCareNotification,
+  subscribeToRecipientNotifications,
+} from '../services/notificationService';
+import { useAuth } from '../context/AuthContext';
+import { playMealChime } from '../utils/sound';
 
 interface AdminDashboardProps {
   state: CareState;
@@ -25,7 +35,7 @@ interface AdminDashboardProps {
     friendName?: string,
     meals?: MealRecord[]
   ) => void;
-  onSendNudge: (text: string, emoji: string) => void;
+  onSendNudge: (text: string, emoji: string, targetUserId?: string) => void;
   onResetDay: () => void;
 }
 
@@ -35,6 +45,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onSendNudge,
   onResetDay,
 }) => {
+  const { user, userProfile } = useAuth();
   const [activeTab, setActiveTab] = useState<'status' | 'history' | 'settings'>('status');
   const [customMsg, setCustomMsg] = useState('');
   const [breakfastTime, setBreakfastTime] = useState(
@@ -51,19 +62,79 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [adminNameInput, setAdminNameInput] = useState(state.adminName);
   const [friendNameInput, setFriendNameInput] = useState(state.friendName);
   const [savedAlert, setSavedAlert] = useState(false);
+  const [sentAlert, setSentAlert] = useState<string | null>(null);
+
+  // Registered Firestore users & target friend selection
+  const [registeredUsers, setRegisteredUsers] = useState<UserProfile[]>([]);
+  const [selectedRecipientId, setSelectedRecipientId] = useState<string>('');
+  const [sentNotifications, setSentNotifications] = useState<CareNotificationItem[]>([]);
+
+  // Listen to Firestore users list
+  useEffect(() => {
+    if (user) {
+      const unsub = subscribeToRegisteredUsers((users) => {
+        setRegisteredUsers(users);
+        // Default select the first non-admin friend or existing friend
+        if (!selectedRecipientId && users.length > 0) {
+          const friendCandidate = users.find((u) => u.id !== user.uid) || users[0];
+          setSelectedRecipientId(friendCandidate.id);
+        }
+      });
+      return () => unsub();
+    }
+  }, [user, selectedRecipientId]);
+
+  // Selected recipient profile
+  const selectedFriend =
+    registeredUsers.find((u) => u.id === selectedRecipientId) ||
+    (registeredUsers.length > 0 ? registeredUsers[0] : null);
 
   const completedWater = state.waterSlots.filter((s) => s.status === 'completed').length;
   const totalWater = state.waterSlots.length;
   const sleepHours = state.sleep.hoursSlept || 0;
 
   const quickNudges = [
-    { text: "Hey! Breakfast time 🐼 Have you eaten?", emoji: '🍳' },
-    { text: "Don't forget your lunch 🙂", emoji: '🍛' },
-    { text: "Time for some water 💧", emoji: '💧' },
-    { text: "Hey buddy! Remember to get your 8 hours of sleep tonight 🐼🌙", emoji: '🌙' },
-    { text: "Sending warm tea & cozy vibes 🍵🐼 Take it easy today!", emoji: '🍵' },
-    { text: "Just checking in 🐼 Take care of yourself!", emoji: '🐼' },
+    { text: "Hey! Breakfast time 🐼 Have you eaten?", emoji: '🍳', type: 'meal' as const, title: 'Breakfast Reminder' },
+    { text: "Don't forget your lunch 🙂", emoji: '🍛', type: 'meal' as const, title: 'Lunch Reminder' },
+    { text: "Time for some water 💧", emoji: '💧', type: 'water' as const, title: 'Hydration Check-In' },
+    { text: "Hey buddy! Remember to get your 8 hours of sleep tonight 🐼🌙", emoji: '🌙', type: 'sleep' as const, title: '8 Hours Sleep Target' },
+    { text: "Sending warm tea & cozy vibes 🍵🐼 Take it easy today!", emoji: '🍵', type: 'period' as const, title: 'Period & Cycle Care' },
+    { text: "Just checking in 🐼 Take care of yourself!", emoji: '🐼', type: 'nudge' as const, title: 'Best Friend Check-In' },
   ];
+
+  const handleSendTargetedNotification = async (
+    text: string,
+    emoji: string,
+    title = 'Daily Care 🐼',
+    type: 'meal' | 'water' | 'sleep' | 'period' | 'nudge' | 'custom' = 'nudge'
+  ) => {
+    playMealChime(true);
+    onSendNudge(text, emoji, selectedFriend?.id);
+
+    if (user && selectedFriend) {
+      try {
+        await sendCareNotification({
+          recipientId: selectedFriend.id,
+          recipientEmail: selectedFriend.email,
+          recipientName: selectedFriend.displayName,
+          senderId: user.uid,
+          senderName: userProfile?.displayName || adminNameInput || 'Admin 🛡️',
+          senderRole: 'admin',
+          type,
+          title,
+          message: text,
+          emoji,
+        });
+        setSentAlert(`Notification sent in real-time to ${selectedFriend.displayName}! 🐼`);
+        setTimeout(() => setSentAlert(null), 3500);
+      } catch (err) {
+        console.error('Failed to send Firestore notification:', err);
+      }
+    } else {
+      setSentAlert(`Reminder sent to ${state.friendName}! 🐼`);
+      setTimeout(() => setSentAlert(null), 3500);
+    }
+  };
 
   const handleSaveSettings = () => {
     const updatedMeals = state.meals.map((m) => {
@@ -98,7 +169,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         return (
           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-emerald-100 text-emerald-800 text-xs font-bold">
             <CheckCircle2 size={12} />
-            <span>Ate {meal.completedAt ? `(${new Date(meal.completedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})` : ''}</span>
+            <span>
+              Ate{' '}
+              {meal.completedAt
+                ? `(${new Date(meal.completedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
+                : ''}
+            </span>
           </span>
         );
       case 'not_eaten':
@@ -127,6 +203,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   return (
     <div className="space-y-5">
+      {/* Sent notification feedback banner */}
+      {sentAlert && (
+        <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-300 text-xs font-bold text-emerald-900 flex items-center justify-between animate-in fade-in">
+          <div className="flex items-center gap-2">
+            <CheckCheck size={16} className="text-emerald-700" />
+            <span>{sentAlert}</span>
+          </div>
+          <button onClick={() => setSentAlert(null)} className="text-emerald-800 hover:text-emerald-950">
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Tab Selector */}
       <div className="flex p-1 rounded-2xl bg-stone-200/80 border border-stone-300/80 max-w-md mx-auto">
         <button
@@ -163,6 +252,63 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {activeTab === 'status' && (
         <div className="space-y-4">
+          {/* Target Friend Selector Card */}
+          <div className="bg-white rounded-3xl p-5 border border-stone-200 shadow-xs">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center text-lg border border-emerald-200">
+                  <Users size={18} />
+                </div>
+                <div>
+                  <h4 className="font-bold text-xs sm:text-sm text-slate-800 font-display">
+                    Select Target Friend for Reminders
+                  </h4>
+                  <p className="text-[11px] text-slate-500">
+                    Reminders will sync directly to their device via Firestore in real-time
+                  </p>
+                </div>
+              </div>
+
+              {registeredUsers.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-slate-500">Friend:</span>
+                  <select
+                    value={selectedRecipientId}
+                    onChange={(e) => setSelectedRecipientId(e.target.value)}
+                    className="px-3 py-1.5 rounded-xl bg-stone-50 border border-stone-300 text-xs font-bold text-slate-800 focus:outline-emerald-500"
+                  >
+                    {registeredUsers.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.displayName} ({u.email})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+
+            {/* Selected Friend Badge */}
+            <div className="p-3 rounded-2xl bg-stone-50/80 border border-stone-200 flex items-center justify-between text-xs">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-800 font-bold flex items-center justify-center text-xs">
+                  {selectedFriend?.displayName?.charAt(0) || '🐼'}
+                </div>
+                <div>
+                  <div className="font-bold text-slate-800">
+                    {selectedFriend?.displayName || state.friendName}
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    {selectedFriend?.email || 'Connected Device'} •{' '}
+                    <span className="text-emerald-700 font-semibold">Ready for Real-Time Sync</span>
+                  </div>
+                </div>
+              </div>
+              <span className="px-2.5 py-1 rounded-xl bg-emerald-100 text-emerald-800 font-bold text-[10px]">
+                Target Recipient
+              </span>
+            </div>
+          </div>
+
           {/* Friend Status Overview Card */}
           <div className="bg-white rounded-3xl p-5 sm:p-6 border border-stone-200 shadow-xs">
             <div className="flex items-center justify-between gap-2 mb-4 pb-3 border-b border-stone-100">
@@ -171,7 +317,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   Best Friend Monitoring
                 </span>
                 <h3 className="font-extrabold text-base sm:text-lg text-slate-800 font-display">
-                  {state.friendName}'s Care Overview Today
+                  {selectedFriend?.displayName || state.friendName}'s Care Overview Today
                 </h3>
               </div>
               <div className="text-right">
@@ -207,7 +353,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <div>
                     <div className="font-bold text-xs text-slate-800">Cycle Care</div>
                     <div className="text-[11px] text-slate-500">
-                      {state.period.isPeriodActive ? 'Period Active 🍵' : `~${state.period.daysUntilNextPeriod}d to next`}
+                      {state.period.isPeriodActive
+                        ? 'Period Active 🍵'
+                        : `~${state.period.daysUntilNextPeriod}d to next`}
                     </div>
                   </div>
                 </div>
@@ -274,11 +422,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           </div>
 
-          {/* Quick Nudges */}
+          {/* Quick Real-Time Nudges */}
           <div className="bg-white rounded-3xl p-5 sm:p-6 border border-stone-200 shadow-xs">
             <h3 className="font-bold text-sm sm:text-base text-slate-800 font-display mb-1 flex items-center gap-1.5">
               <Sparkles size={16} className="text-amber-500" />
-              <span>Send 1-Tap Best-Friend Reminders</span>
+              <span>Send Real-Time Notification to {selectedFriend?.displayName || state.friendName}</span>
             </h3>
             <p className="text-xs text-slate-500 mb-3">
               Gentle supportive check-ins matching our caring best-friend tone:
@@ -288,7 +436,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               {quickNudges.map((nudge, idx) => (
                 <button
                   key={idx}
-                  onClick={() => onSendNudge(nudge.text, nudge.emoji)}
+                  onClick={() =>
+                    handleSendTargetedNotification(nudge.text, nudge.emoji, nudge.title, nudge.type)
+                  }
                   className="p-3 rounded-2xl bg-stone-50 hover:bg-emerald-50/80 border border-stone-200/80 hover:border-emerald-200 text-left transition-colors flex items-center justify-between group"
                 >
                   <div className="flex items-center gap-2 pr-2">
@@ -308,21 +458,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 type="text"
                 value={customMsg}
                 onChange={(e) => setCustomMsg(e.target.value)}
-                placeholder={`Type a gentle reminder to ${state.friendName}...`}
+                placeholder={`Type a gentle reminder to ${selectedFriend?.displayName || state.friendName}...`}
                 className="flex-1 px-4 py-2.5 rounded-2xl bg-stone-50 border border-stone-300 text-xs focus:outline-emerald-500 text-slate-800 placeholder:text-slate-400"
               />
               <button
                 disabled={!customMsg.trim()}
                 onClick={() => {
                   if (customMsg.trim()) {
-                    onSendNudge(customMsg.trim(), '🐼');
+                    handleSendTargetedNotification(
+                      customMsg.trim(),
+                      '🐼',
+                      'Best Friend Note',
+                      'custom'
+                    );
                     setCustomMsg('');
                   }
                 }}
                 className="px-4 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-xs font-bold transition-all shadow-xs flex items-center gap-1.5 shrink-0"
               >
                 <Send size={13} />
-                <span>Send</span>
+                <span>Send via Cloud</span>
               </button>
             </div>
           </div>

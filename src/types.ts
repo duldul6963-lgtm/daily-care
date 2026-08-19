@@ -1,5 +1,34 @@
 export type UserRole = 'admin' | 'friend';
 
+export interface UserProfile {
+  id: string;
+  email: string;
+  displayName: string;
+  photoURL?: string;
+  role: UserRole;
+  createdAt?: string;
+  lastActive?: string;
+}
+
+export type NotificationType = 'meal' | 'water' | 'sleep' | 'period' | 'nudge' | 'custom';
+
+export interface CareNotificationItem {
+  id: string;
+  recipientId: string;
+  recipientEmail?: string;
+  recipientName?: string;
+  senderId: string;
+  senderName: string;
+  senderRole: UserRole;
+  type: NotificationType;
+  title: string;
+  message: string;
+  emoji?: string;
+  read: boolean;
+  actionTaken?: string;
+  createdAt: string;
+}
+
 export type MealId = 'breakfast' | 'lunch' | 'dinner';
 
 export type MealStatusType = 'ate' | 'not_eaten' | 'waiting' | 'upcoming';
